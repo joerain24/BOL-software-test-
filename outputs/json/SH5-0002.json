@@ -1,0 +1,12 @@
+{
+  "bol_number": null,
+  "pro_number": "DUCTS",
+  "ship_date": "2025-05-22",
+  "carrier": {
+    "name": null,
+    "scac": "NAME"
+  },
+  "freight_lines": [],
+  "total_weight": null,
+  "total_packages": null
+}
