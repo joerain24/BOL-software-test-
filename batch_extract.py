@@ -1,4 +1,4 @@
-import os, json, csv, glob, io, re, asyncio
+import os, json, csv, glob, io, re, asyncio, time
 from PIL import Image
 from pdf2image import convert_from_bytes
 import pytesseract
@@ -135,7 +135,8 @@ def main():
         print("No sample files in samples/"); return
     os.makedirs(OUT_DIR, exist_ok=True)
     for idx, path in enumerate(files, 1):
-        process_one(path, idx)
+    process_one(path, idx)
+    time.sleep(2)  # small pause so we don't hit rate limits
 
 if __name__ == "__main__":
     main()
