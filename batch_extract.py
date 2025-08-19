@@ -142,7 +142,7 @@ def main():
     for idx, path in enumerate(files, 1):
         process_one(path, idx)
         import time
-        time.sleep(2)  # pause to avoid hitting API rate limits
+        time.sleep(5)  # pause to avoid hitting API rate limits
 
 if __name__ == "__main__":
     main()
