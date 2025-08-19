@@ -130,13 +130,19 @@ def process_one(path: str, idx: int):
     print("Done →", id_)
 
 def main():
-    files = sorted(glob.glob("samples/*.pdf")) + sorted(glob.glob("samples/*.png")) + sorted(glob.glob("samples/*.jpg"))
+    files = sorted(glob.glob("samples/*.pdf")) + \
+            sorted(glob.glob("samples/*.png")) + \
+            sorted(glob.glob("samples/*.jpg"))
     if not files:
-        print("No sample files in samples/"); return
+        print("No sample files in samples/")
+        return
+
     os.makedirs(OUT_DIR, exist_ok=True)
+
     for idx, path in enumerate(files, 1):
-    process_one(path, idx)
-    time.sleep(2)  # small pause so we don't hit rate limits
+        process_one(path, idx)
+        import time
+        time.sleep(2)  # pause to avoid hitting API rate limits
 
 if __name__ == "__main__":
     main()
