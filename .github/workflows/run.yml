@@ -12,6 +12,12 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      EXTRACTOR_MODE: OPENAI
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Optional: pick a specific model
+      # OPENAI_MODEL: gpt-4.1-mini
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,15 +33,23 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt httpx==0.27.0
 
-      - name: Run the batch extractor
-        run: python batch_extract.py
+      - name: Run the batch extractor (OpenAI)
+        run: |
+          mkdir -p outputs/json
+          python batch_extract.py
+          ls -R
 
       - name: Commit outputs back to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add outputs
-          git commit -m "Add OCR outputs" || echo "No changes to commit"
-          git push
+          if [ -d outputs ] && [ -n "$(ls -A outputs || true)" ]; then
+            git add outputs
+            git commit -m "Add LLM OCR outputs" || echo "No changes"
+            git push
+          else
+            echo "No outputs to commit."
+          fi
+
