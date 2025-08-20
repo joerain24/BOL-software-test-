@@ -1,13 +1,13 @@
 name: Run OCR → OpenAI → Outputs
 
 on:
-  workflow_dispatch:
-  push:
+  workflow_dispatch:       # run manually from the Actions tab
+  push:                    # also run when PDFs/images are added/changed
     paths:
       - "samples/**"
 
 permissions:
-  contents: write
+  contents: write          # allow pushing commits back
 
 concurrency:
   group: ocr-openai-${{ github.ref }}
@@ -16,12 +16,12 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     env:
       EXTRACTOR_MODE: OPENAI
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_MODEL: gpt-5           # use the exact model id you have access to
+      OPENAI_MODEL: gpt-5                 # use the exact model id your key supports
       OPENAI_MAX_ATTEMPTS: "8"
       OPENAI_BASE_SLEEP: "2.5"
 
@@ -57,13 +57,19 @@ jobs:
           ls -R || true
 
       - name: Commit outputs back to repo
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -d outputs ] && [ -n "$(ls -A outputs || true)" ]; then
-            git add outputs
-            git commit -m "Add waybills CSV + JSON" || echo "No changes to commit"
+
+          if [ -d outputs ]; then
+            git add -A outputs || true
+          fi
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Add waybills CSV + JSON"
             git push
-          else:
+          else
             echo "No outputs to commit."
           fi
+
