@@ -1,148 +1,98 @@
-import os
-import io
-import re
-import csv
-import json
-import glob
-import time
-import asyncio
+import os, io, re, csv, json, glob, time, asyncio
 from typing import List
-
 from PIL import Image
 from pdf2image import convert_from_bytes
 import pytesseract
 from dateutil import parser
 
-# LLM caller (OpenAI). Make sure llm_extract.py is in the repo root.
 from llm_extract import extract_openai
 
 OUT_DIR = "outputs"
 JSON_DIR = os.path.join(OUT_DIR, "json")
-CSV_HEADERS = os.path.join(OUT_DIR, "bol_headers.csv")
-CSV_LINES = os.path.join(OUT_DIR, "bol_lines.csv")
+WAYBILLS_CSV = os.path.join(OUT_DIR, "waybills.csv")
 
 os.makedirs(JSON_DIR, exist_ok=True)
 
-# ---------- Simple regex patterns (fallback PoC) ----------
-BOL_RE = re.compile(r"\b(?:BOL|B\.O\.L\.?|Bill of Lading)[:#\s-]*([A-Z0-9-]{6,})", re.I)
-PRO_RE = re.compile(r"\b(?:PRO|Pro No\.?|Pro#)[:#\s-]*([A-Z0-9-]{5,})", re.I)
+# minimal regex fallback (fills only what we can quickly guess)
 DATE_RE = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
-SCAC_RE = re.compile(r"\b[A-Z]{2,4}\b")
-WEIGHT_RE = re.compile(r"\b(\d{2,6})\s?(lb|lbs|pounds|kg|kgs)\b", re.I)
-
 
 def to_iso_date(s: str | None) -> str | None:
-    if not s:
-        return None
+    if not s: return None
     try:
         return parser.parse(s, dayfirst=False).date().isoformat()
     except Exception:
         return None
 
-
 def ocr_any(path: str) -> str:
-    """OCR a PDF or image path and return plain text."""
     with open(path, "rb") as fh:
         data = fh.read()
-    # Try PDF first
     try:
         pages = convert_from_bytes(data, dpi=300)
         texts = [pytesseract.image_to_string(p) for p in pages]
         return "\n\n".join(texts)
     except Exception:
-        # Fallback: image
         im = Image.open(io.BytesIO(data))
         return pytesseract.image_to_string(im)
 
-
 def extract_regex(text: str) -> dict:
-    """Very basic regex fallback for PoC."""
     out = {
-        "bol_number": None,
-        "pro_number": None,
-        "ship_date": None,
-        "carrier": {"name": None, "scac": None},
-        "freight_lines": [],
-        "total_weight": None,
-        "total_packages": None,
+        "waybill_number": None,
+        "date": None,
+        "shipper": None,
+        "carrier": None,
+        "po_number": None,
+        "material": None,
+        "gross_weight": None,
+        "tare_weight": None,
+        "net_weight": None,
+        "location": None,
+        "ticket_number": None,
+        "vehicle_number": None,
+        "signature_present": None,
+        "radiation_checked": None,
     }
-    if m := BOL_RE.search(text):
-        out["bol_number"] = m.group(1).strip()
-    if m := PRO_RE.search(text):
-        out["pro_number"] = m.group(1).strip()
     if m := DATE_RE.search(text):
-        out["ship_date"] = to_iso_date(m.group(1))
-
-    # crude SCAC guess
-    scacs = SCAC_RE.findall(text)
-    if scacs:
-        out["carrier"]["scac"] = scacs[0]
-
-    # crude weights (pick largest as total)
-    weights: List[float] = []
-    for w, unit in WEIGHT_RE.findall(text):
-        v = float(w)
-        unit = unit.lower()
-        if unit.startswith("kg"):
-            v *= 2.20462  # kg → lb
-        weights.append(v)
-    if weights:
-        out["total_weight"] = max(weights)
-        out["freight_lines"].append({
-            "description": "Freight",
-            "quantity": 1,
-            "package_type": "PKG",
-            "weight": out["total_weight"],
-            "weight_unit": "lb"
-        })
+        out["date"] = to_iso_date(m.group(1))
     return out
 
-
-def write_csvs(id_: str, data: dict) -> None:
-    # headers CSV
-    header_exists = os.path.exists(CSV_HEADERS)
-    with open(CSV_HEADERS, "a", newline="") as f:
+def write_waybill_row(data: dict, source_file: str) -> None:
+    header = [
+        "Waybill #","Date","Shipper","Carrier","PO #","Material",
+        "Gross Wt","Tare Wt","Net Wt","Location","Ticket #","Vehicle #",
+        "Signature Present","Radiation Checked","Source File"
+    ]
+    file_exists = os.path.exists(WAYBILLS_CSV)
+    with open(WAYBILLS_CSV, "a", newline="") as f:
         w = csv.writer(f)
-        if not header_exists:
-            w.writerow(["id", "bol_number", "pro_number", "ship_date", "carrier_scac", "total_weight", "total_packages"])
+        if not file_exists:
+            w.writerow(header)
         w.writerow([
-            id_,
-            data.get("bol_number") or "",
-            data.get("pro_number") or "",
-            data.get("ship_date") or "",
-            (data.get("carrier") or {}).get("scac") or "",
-            data.get("total_weight") or "",
-            data.get("total_packages") or "",
+            data.get("waybill_number") or "",
+            data.get("date") or "",
+            data.get("shipper") or "",
+            data.get("carrier") or "",
+            data.get("po_number") or "",
+            data.get("material") or "",
+            data.get("gross_weight") or "",
+            data.get("tare_weight") or "",
+            data.get("net_weight") or "",
+            data.get("location") or "",
+            data.get("ticket_number") or "",
+            data.get("vehicle_number") or "",
+            data.get("signature_present") or "",
+            data.get("radiation_checked") or "",
+            source_file,
         ])
-
-    # lines CSV
-    lines_exists = os.path.exists(CSV_LINES)
-    with open(CSV_LINES, "a", newline="") as f:
-        w = csv.writer(f)
-        if not lines_exists:
-            w.writerow(["id", "description", "quantity", "package_type", "weight", "weight_unit"])
-        for fl in data.get("freight_lines", []):
-            w.writerow([
-                id_,
-                fl.get("description", ""),
-                fl.get("quantity", ""),
-                fl.get("package_type", ""),
-                fl.get("weight", ""),
-                fl.get("weight_unit", ""),
-            ])
-
 
 def process_one(path: str, idx: int) -> None:
     print("Processing", path)
     text = ocr_any(path)
+    mode = os.getenv("EXTRACTOR_MODE", "REGEX").upper()
 
-    MODE = os.getenv("EXTRACTOR_MODE", "REGEX").upper()
-    if MODE == "OPENAI":
+    if mode == "OPENAI":
         try:
-            # OpenAI JSON extraction
             data = asyncio.get_event_loop().run_until_complete(extract_openai(text))
         except RuntimeError as e:
-            # Clean fallback when quota is exhausted (or other explicit fail-fast)
             if "INSUFFICIENT_QUOTA" in str(e):
                 print("[process_one] OpenAI quota exhausted — falling back to regex for this file.")
                 data = extract_regex(text)
@@ -151,16 +101,16 @@ def process_one(path: str, idx: int) -> None:
     else:
         data = extract_regex(text)
 
+    # Save raw JSON (audit/debug)
     base = os.path.splitext(os.path.basename(path))[0]
-    id_ = f"{base}-{idx:04d}"
-
+    job_id = f"{base}-{idx:04d}"
     os.makedirs(JSON_DIR, exist_ok=True)
-    with open(os.path.join(JSON_DIR, f"{id_}.json"), "w") as f:
+    with open(os.path.join(JSON_DIR, f"{job_id}.json"), "w") as f:
         json.dump(data, f, indent=2)
 
-    write_csvs(id_, data)
-    print("Done →", id_)
-
+    # Append a row to waybills.csv
+    write_waybill_row(data, source_file=os.path.basename(path))
+    print("Done →", job_id)
 
 def main() -> None:
     files = sorted(glob.glob("samples/*.pdf")) \
@@ -171,15 +121,13 @@ def main() -> None:
         print("No sample files in samples/")
         return
 
-    # TEMP while testing: only process first file to avoid rate limits
+    # While testing, process just the first file to avoid rate limits
     files = files[:1]
 
     os.makedirs(OUT_DIR, exist_ok=True)
-
     for idx, path in enumerate(files, 1):
         process_one(path, idx)
-        time.sleep(5)  # pause to avoid hitting API rate limits
-
+        time.sleep(5)
 
 if __name__ == "__main__":
     main()
