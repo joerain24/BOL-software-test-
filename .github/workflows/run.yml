@@ -1,13 +1,13 @@
 name: Run OCR → OpenAI → Outputs
 
 on:
-  workflow_dispatch:       # run manually from the Actions tab
-  push:                    # also run when PDFs/images are added/changed
+  workflow_dispatch:
+  push:
     paths:
       - "samples/**"
 
 permissions:
-  contents: write          # allow pushing commits back
+  contents: write
 
 concurrency:
   group: ocr-openai-${{ github.ref }}
@@ -21,9 +21,9 @@ jobs:
     env:
       EXTRACTOR_MODE: OPENAI
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_MODEL: gpt-5                 # use the exact model id your key supports
-      OPENAI_MAX_ATTEMPTS: "8"
-      OPENAI_BASE_SLEEP: "2.5"
+      OPENAI_MODEL: gpt-4o        # use this first; switch to gpt-5 later if your key supports it
+      OPENAI_MAX_ATTEMPTS: "4"
+      OPENAI_BASE_SLEEP: "2.0"
 
     steps:
       - name: Checkout
@@ -72,4 +72,3 @@ jobs:
           else
             echo "No outputs to commit."
           fi
-
