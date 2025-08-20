@@ -114,18 +114,17 @@ def process_one(path: str, idx: int):
 
     # Choose extraction path
     MODE = os.getenv("EXTRACTOR_MODE", "REGEX").upper()
-    if MODE == "OPENAI":
-        try:
-            data = asyncio.get_event_loop().run_until_complete(extract_openai(text))
-        except RuntimeError as e:
-            if "INSUFFICIENT_QUOTA" in str(e):
-                print("[process_one] OpenAI quota exhausted — falling back to regex for this file.")
-                data = extract_regex(text)
-            else:
-                raise
-    else:
+if MODE == "OPENAI":
+    try:
+        data = asyncio.get_event_loop().run_until_complete(extract_openai(text))
+    except RuntimeError as e:
+        if "INSUFFICIENT_QUOTA" in str(e):
+            print("[process_one] OpenAI quota exhausted — falling back to regex for this file.")
+            data = extract_regex(text)
+        else:
+            raise
+else:
     data = extract_regex(text)
-
 
     base = os.path.splitext(os.path.basename(path))[0]
     id_ = f"{base}-{idx:04d}"
