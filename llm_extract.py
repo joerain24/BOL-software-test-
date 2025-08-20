@@ -1,4 +1,4 @@
-# llm_extract.py — OpenAI caller with retries/backoff + clear auth checks
+# llm_extract.py — OpenAI caller with clean fail-fast on insufficient_quota
 import os, json, httpx, time, random
 
 SCHEMA = {
@@ -7,17 +7,10 @@ SCHEMA = {
     "bol_number": {"type":"string"},
     "pro_number": {"type":"string"},
     "ship_date": {"type":"string"},
-    "carrier": {"type":"object","properties":{
-      "name":{"type":"string"},
-      "scac":{"type":"string"}
-    }},
+    "carrier": {"type":"object","properties":{"name":{"type":"string"},"scac":{"type":"string"}}},
     "freight_lines": {"type":"array","items":{"type":"object","properties":{
-      "description":{"type":"string"},
-      "quantity":{"type":"number"},
-      "package_type":{"type":"string"},
-      "weight":{"type":"number"},
-      "weight_unit":{"type":"string"}
-    }}},
+      "description":{"type":"string"},"quantity":{"type":"number"},"package_type":{"type":"string"},
+      "weight":{"type":"number"},"weight_unit":{"type":"string"}}}},
     "total_weight":{"type":"number"},
     "total_packages":{"type":"number"}
   },
@@ -25,13 +18,9 @@ SCHEMA = {
 }
 
 def _prompt():
-    return (
-        "Extract Bill of Lading fields from the provided OCR text. "
-        "Return ONLY valid JSON matching the schema. If unsure, use null."
-    )
+    return "Extract Bill of Lading fields from OCR text. Return ONLY valid JSON matching the schema. If unsure, use null."
 
 def _coerce_json(s: str):
-    # be forgiving if model adds extra text; try to slice the outermost JSON block
     try:
         return json.loads(s)
     except Exception:
@@ -41,88 +30,64 @@ def _coerce_json(s: str):
         raise
 
 async def extract_openai(ocr_text: str) -> dict:
-    # -------- Auth & config checks --------
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    model = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+    model = (os.getenv("OPENAI_MODEL") or "gpt-4o").strip()  # set to gpt-5 if you have it
     if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is missing/empty. "
-            "Add a repo secret named OPENAI_API_KEY and expose it in the workflow env."
-        )
+        raise RuntimeError("OPENAI_API_KEY missing. Add it as a repo secret and pass it in the workflow env.")
 
+    # Keep the payload small to reduce cost and avoid quota usage
+    text = ocr_text[:6000]  # trim long OCR blobs
     url = "https://api.openai.com/v1/chat/completions"
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _prompt()},
-            {"role": "user", "content": ocr_text[:12000]}  # trim huge OCR blobs
+            {"role":"system","content": _prompt()},
+            {"role":"user","content": text}
         ],
-        "response_format": {"type": "json_schema", "json_schema": SCHEMA}
+        "response_format": {"type":"json_schema","json_schema": SCHEMA}
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    # -------- Retry settings (tuneable via env) --------
-    max_attempts = int(os.getenv("OPENAI_MAX_ATTEMPTS", "7"))
-    base_sleep = float(os.getenv("OPENAI_BASE_SLEEP", "2.0"))  # seconds
+    max_attempts = 4
+    base_sleep = 2.0
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         for attempt in range(1, max_attempts + 1):
+            resp = await client.post(url, headers=headers, json=payload)
+            status = resp.status_code
+
+            # Try to parse any error body for hints
+            body_text = resp.text
             try:
-                resp = await client.post(url, headers=headers, json=payload)
-                status = resp.status_code
+                body = resp.json()
+            except Exception:
+                body = {}
 
-                # Handle rate limits & server errors with backoff
-                if status == 429 or 500 <= status < 600:
-                    retry_after = resp.headers.get("Retry-After")
-                    if retry_after:
-                        sleep_s = float(retry_after)
-                    else:
-                        sleep_s = base_sleep * (2 ** (attempt - 1)) + random.uniform(0, 0.6)
-                    print(f"[extract_openai] HTTP {status} (attempt {attempt}/{max_attempts}). "
-                          f"Backing off {sleep_s:.1f}s…")
-                    if attempt == max_attempts:
-                        # no more retries — raise with brief body snippet
-                        try:
-                            print(f"[extract_openai] Response body: {resp.text[:300]}")
-                        except Exception:
-                            pass
-                        resp.raise_for_status()
-                    time.sleep(sleep_s)
-                    continue
-
-                # For other 4xx (e.g., 401/403/400), fail fast with a helpful hint
-                if 400 <= status < 500:
-                    snippet = resp.text[:400]
-                    raise httpx.HTTPStatusError(
-                        f"OpenAI HTTP {status}. Likely bad/missing auth or invalid request. "
-                        f"Body: {snippet}",
-                        request=resp.request, response=resp
-                    )
-
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
+            if status == 200:
+                content = body["choices"][0]["message"]["content"]
                 return _coerce_json(content)
 
-            except httpx.HTTPStatusError as e:
-                # 401/403 most common cause: missing/invalid Authorization header
-                if e.response is not None and e.response.status_code in (401, 403):
-                    raise RuntimeError(
-                        "OpenAI auth failed (401/403). "
-                        "Verify your repo secret OPENAI_API_KEY and that the workflow passes it:\n"
-                        "env:\n  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n"
-                        "Also ensure there are no extra quotes/spaces in the secret."
-                    ) from e
-                # Other non-retriable 4xx errors
-                raise
-            except Exception as e:
-                # Network hiccup; backoff and retry
+            # Fail fast on quota problems
+            if status in (429, 400) and isinstance(body, dict):
+                err = (body.get("error") or {})
+                if err.get("type") == "insufficient_quota" or "quota" in (err.get("message","").lower()):
+                    raise RuntimeError("INSUFFICIENT_QUOTA: Your OpenAI plan/credits are exhausted.")
+
+            # Gentle backoff for real throttling
+            if status == 429 or 500 <= status < 600:
                 if attempt == max_attempts:
-                    raise
-                sleep_s = base_sleep * (2 ** (attempt - 1)) + random.uniform(0, 0.6)
-                print(f"[extract_openai] Exception {type(e).__name__} on attempt {attempt}; "
-                      f"sleeping {sleep_s:.1f}s then retrying…")
+                    resp.raise_for_status()
+                retry_after = resp.headers.get("Retry-After")
+                sleep_s = float(retry_after) if retry_after else base_sleep * (2 ** (attempt - 1)) + random.uniform(0, 0.6)
+                print(f"[extract_openai] HTTP {status} attempt {attempt}/{max_attempts}; backing off {sleep_s:.1f}s…")
                 time.sleep(sleep_s)
+                continue
+
+            # Other client errors → show snippet and stop
+            if 400 <= status < 500:
+                raise httpx.HTTPStatusError(f"OpenAI HTTP {status}. Body: {body_text[:300]}", request=resp.request, response=resp)
+
+            # Unknown server error
+            resp.raise_for_status()
+
 
