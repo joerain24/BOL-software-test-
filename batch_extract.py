@@ -9,11 +9,12 @@ from llm_extract import extract_openai
 
 OUT_DIR = "outputs"
 JSON_DIR = os.path.join(OUT_DIR, "json")
+DEBUG_DIR = os.path.join(OUT_DIR, "debug")
 WAYBILLS_CSV = os.path.join(OUT_DIR, "waybills.csv")
 
 os.makedirs(JSON_DIR, exist_ok=True)
+os.makedirs(DEBUG_DIR, exist_ok=True)
 
-# minimal regex fallback (fills only what we can quickly guess)
 DATE_RE = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
 
 def to_iso_date(s: str | None) -> str | None:
@@ -23,34 +24,28 @@ def to_iso_date(s: str | None) -> str | None:
     except Exception:
         return None
 
+def _ocr_image(im: Image.Image) -> str:
+    im = im.convert("L")  # grayscale
+    cfg = "--oem 1 --psm 6"
+    return pytesseract.image_to_string(im, config=cfg)
+
 def ocr_any(path: str) -> str:
     with open(path, "rb") as fh:
         data = fh.read()
     try:
         pages = convert_from_bytes(data, dpi=300)
-        texts = [pytesseract.image_to_string(p) for p in pages]
+        texts = [_ocr_image(p) for p in pages]
         return "\n\n".join(texts)
     except Exception:
         im = Image.open(io.BytesIO(data))
-        return pytesseract.image_to_string(im)
+        return _ocr_image(im)
 
 def extract_regex(text: str) -> dict:
-    out = {
-        "waybill_number": None,
-        "date": None,
-        "shipper": None,
-        "carrier": None,
-        "po_number": None,
-        "material": None,
-        "gross_weight": None,
-        "tare_weight": None,
-        "net_weight": None,
-        "location": None,
-        "ticket_number": None,
-        "vehicle_number": None,
-        "signature_present": None,
-        "radiation_checked": None,
-    }
+    out = {k: None for k in [
+        "waybill_number","date","shipper","carrier","po_number","material",
+        "gross_weight","tare_weight","net_weight","location","ticket_number",
+        "vehicle_number","signature_present","radiation_checked"
+    ]}
     if m := DATE_RE.search(text):
         out["date"] = to_iso_date(m.group(1))
     return out
@@ -87,8 +82,12 @@ def write_waybill_row(data: dict, source_file: str) -> None:
 def process_one(path: str, idx: int) -> None:
     print("Processing", path)
     text = ocr_any(path)
-    mode = os.getenv("EXTRACTOR_MODE", "REGEX").upper()
 
+    # DEBUG: save OCR text so you can inspect if nulls happen
+    with open(os.path.join(DEBUG_DIR, f"ocr_{os.path.basename(path)}.txt"), "w", encoding="utf-8") as df:
+        df.write(text[:20000])
+
+    mode = os.getenv("EXTRACTOR_MODE", "REGEX").upper()
     if mode == "OPENAI":
         try:
             data = asyncio.get_event_loop().run_until_complete(extract_openai(text))
@@ -101,14 +100,24 @@ def process_one(path: str, idx: int) -> None:
     else:
         data = extract_regex(text)
 
-    # Save raw JSON (audit/debug)
+    # derive net if missing
+    try:
+        if (data.get("net_weight") in (None, "") and
+            data.get("gross_weight") not in (None, "") and
+            data.get("tare_weight") not in (None, "")):
+            gw = float(data["gross_weight"]); tw = float(data["tare_weight"])
+            data["net_weight"] = gw - tw
+    except Exception:
+        pass
+
     base = os.path.splitext(os.path.basename(path))[0]
     job_id = f"{base}-{idx:04d}"
-    os.makedirs(JSON_DIR, exist_ok=True)
+
+    # save raw JSON
     with open(os.path.join(JSON_DIR, f"{job_id}.json"), "w") as f:
         json.dump(data, f, indent=2)
 
-    # Append a row to waybills.csv
+    # append one row to the single CSV
     write_waybill_row(data, source_file=os.path.basename(path))
     print("Done →", job_id)
 
@@ -121,13 +130,13 @@ def main() -> None:
         print("No sample files in samples/")
         return
 
-    # While testing, process just the first file to avoid rate limits
+    # while testing, just do first file to avoid rate limits
     files = files[:1]
 
     os.makedirs(OUT_DIR, exist_ok=True)
     for idx, path in enumerate(files, 1):
         process_one(path, idx)
-        time.sleep(5)
+        time.sleep(3)
 
 if __name__ == "__main__":
     main()
