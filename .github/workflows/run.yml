@@ -1,28 +1,27 @@
 name: Run OCR → OpenAI → Outputs
 
 on:
-  workflow_dispatch:        # run manually from the Actions tab
-  push:                     # also run when PDFs/images are added/changed
+  workflow_dispatch:
+  push:
     paths:
       - "samples/**"
 
 permissions:
-  contents: write           # needed so the workflow can commit outputs back
+  contents: write
 
 concurrency:
   group: ocr-openai-${{ github.ref }}
-  cancel-in-progress: true  # avoid overlapping runs
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     env:
-      # === mode & OpenAI config ===
       EXTRACTOR_MODE: OPENAI
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # set this repo secret!
-      # Optional tuning (you can leave these out)
-      OPENAI_MODEL: gpt-5
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: gpt-5           # use the exact model id you have access to
       OPENAI_MAX_ATTEMPTS: "8"
       OPENAI_BASE_SLEEP: "2.5"
 
@@ -30,12 +29,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug repo tree (before)
+      - name: Clean outputs (start fresh)
         run: |
-          echo "Repo tree BEFORE:"
-          ls -R || true
-          echo "samples/ listing:"
-          ls -l samples || true
+          git rm -r outputs || true
+          rm -rf outputs
+          mkdir -p outputs/json
 
       - name: Install system OCR deps
         run: |
@@ -54,7 +52,6 @@ jobs:
 
       - name: Run batch extractor (OCR → LLM → Outputs)
         run: |
-          mkdir -p outputs/json
           python batch_extract.py
           echo "Repo tree AFTER:"
           ls -R || true
@@ -65,9 +62,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -d outputs ] && [ -n "$(ls -A outputs || true)" ]; then
             git add outputs
-            git commit -m "Add LLM OCR outputs" || echo "No changes to commit"
+            git commit -m "Add waybills CSV + JSON" || echo "No changes to commit"
             git push
-          else
+          else:
             echo "No outputs to commit."
           fi
-
