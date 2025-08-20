@@ -1,34 +1,22 @@
-# llm_extract.py — OpenAI caller, returns Waybill fields, fail-fast on insufficient_quota
+# llm_extract.py — OpenAI caller, returns Waybill fields; robust JSON; fail-fast on quota
 import os, json, httpx, time, random
 
-SCHEMA = {
-  "type": "object",
-  "properties": {
-    "waybill_number": {"type":"string"},
-    "date": {"type":"string"},             # prefer YYYY-MM-DD
-    "shipper": {"type":"string"},
-    "carrier": {"type":"string"},
-    "po_number": {"type":"string"},
-    "material": {"type":"string"},
-    "gross_weight": {"type":"number"},     # lb
-    "tare_weight": {"type":"number"},      # lb
-    "net_weight": {"type":"number"},       # lb
-    "location": {"type":"string"},
-    "ticket_number": {"type":"string"},
-    "vehicle_number": {"type":"string"},
-    "signature_present": {"type":"string"},   # "Yes" / "No" / "Not Indicated"
-    "radiation_checked": {"type":"string"}    # "Yes" / "No" / "Not Indicated"
-  },
-  "additionalProperties": True
-}
+FIELDS = [
+  "waybill_number","date","shipper","carrier","po_number","material",
+  "gross_weight","tare_weight","net_weight","location","ticket_number",
+  "vehicle_number","signature_present","radiation_checked"
+]
 
 def _prompt():
   return (
-    "Extract these fields from the provided OCR text of a waybill/scale ticket. "
-    "Return ONLY JSON with exactly these keys. If a value is missing/unclear, use null. "
-    "Keys: waybill_number, date (YYYY-MM-DD if possible), shipper, carrier, po_number, material, "
-    "gross_weight (lb), tare_weight (lb), net_weight (lb), location, ticket_number, vehicle_number, "
-    "signature_present ('Yes'/'No'/'Not Indicated'), radiation_checked ('Yes'/'No'/'Not Indicated')."
+    "You are a structured data extractor for US waybills / scale tickets.\n"
+    "Rules:\n"
+    f"• Return ONLY a valid JSON object with these keys exactly: {', '.join(FIELDS)}.\n"
+    "• If a value is unknown, use null (do NOT invent).\n"
+    "• Dates: prefer YYYY-MM-DD if possible.\n"
+    "• Weights are numeric in pounds. If only gross/tare present, compute net_weight = gross_weight - tare_weight.\n"
+    "• Signature fields are 'Yes', 'No', or 'Not Indicated'.\n"
+    "• Keep output strictly JSON; no extra text.\n"
   )
 
 def _coerce_json(s: str):
@@ -42,20 +30,21 @@ def _coerce_json(s: str):
 
 async def extract_openai(ocr_text: str) -> dict:
   api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-  model = (os.getenv("OPENAI_MODEL") or "gpt-5").strip()  # change if your account needs a different id
+  model = (os.getenv("OPENAI_MODEL") or "gpt-4o").strip()  # switch to gpt-5 later if you have access
   if not api_key:
     raise RuntimeError("OPENAI_API_KEY missing. Add it as a repo secret and pass it in the workflow env.")
 
-  # keep payload modest
-  text = ocr_text[:6000]
+  text = ocr_text[:9000]  # keep payload modest
   url = "https://api.openai.com/v1/chat/completions"
   payload = {
     "model": model,
+    "temperature": 0.1,
     "messages": [
       {"role":"system","content": _prompt()},
       {"role":"user","content": text}
     ],
-    "response_format": {"type":"json_schema","json_schema": SCHEMA}
+    # broader support than json_schema
+    "response_format": {"type": "json_object"}
   }
   headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
@@ -93,10 +82,8 @@ async def extract_openai(ocr_text: str) -> dict:
         time.sleep(sleep_s)
         continue
 
-      # other 4xx → show snippet and stop
+      # other 4xx
       if 400 <= status < 500:
         raise httpx.HTTPStatusError(f"OpenAI HTTP {status}. Body: {body_text[:300]}", request=resp.request, response=resp)
 
       resp.raise_for_status()
-
-
