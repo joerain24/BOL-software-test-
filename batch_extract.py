@@ -83,14 +83,17 @@ def process_one(path: str, idx: int) -> None:
     print("Processing", path)
     text = ocr_any(path)
 
-    # DEBUG: save OCR text so you can inspect if nulls happen
+    # DEBUG: save OCR text
     with open(os.path.join(DEBUG_DIR, f"ocr_{os.path.basename(path)}.txt"), "w", encoding="utf-8") as df:
         df.write(text[:20000])
 
     mode = os.getenv("EXTRACTOR_MODE", "REGEX").upper()
+    used_llm = False
     if mode == "OPENAI":
         try:
+            print("[process_one] Using OpenAI extractor…")
             data = asyncio.get_event_loop().run_until_complete(extract_openai(text))
+            used_llm = True
         except RuntimeError as e:
             if "INSUFFICIENT_QUOTA" in str(e):
                 print("[process_one] OpenAI quota exhausted — falling back to regex for this file.")
@@ -98,7 +101,18 @@ def process_one(path: str, idx: int) -> None:
             else:
                 raise
     else:
+        print("[process_one] Using regex extractor (MODE != OPENAI).")
         data = extract_regex(text)
+
+    # NEW: save whatever the LLM gave us (or regex result) before gap-fill
+    base = os.path.splitext(os.path.basename(path))[0]
+    job_id = f"{base}-{idx:04d}"
+    os.makedirs(JSON_DIR, exist_ok=True)
+    with open(os.path.join(DEBUG_DIR, f"llm_{job_id}.json"), "w", encoding="utf-8") as df:
+        json.dump(data, df, indent=2)
+
+    # Fill any missing fields from OCR text via lightweight patterns
+    data = fill_from_text_if_missing(data, text)
 
     # derive net if missing
     try:
@@ -110,16 +124,14 @@ def process_one(path: str, idx: int) -> None:
     except Exception:
         pass
 
-    base = os.path.splitext(os.path.basename(path))[0]
-    job_id = f"{base}-{idx:04d}"
-
-    # save raw JSON
+    # Save final JSON (post gap-fill)
     with open(os.path.join(JSON_DIR, f"{job_id}.json"), "w") as f:
         json.dump(data, f, indent=2)
 
-    # append one row to the single CSV
+    # Append one row to the single CSV
     write_waybill_row(data, source_file=os.path.basename(path))
-    print("Done →", job_id)
+    print(f"Done → {job_id} (LLM used: {used_llm})")
+
 
 def main() -> None:
     files = sorted(glob.glob("samples/*.pdf")) \
