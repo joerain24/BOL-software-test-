@@ -1,0 +1,12 @@
+{
+  "bol_number": null,
+  "pro_number": "cessing",
+  "ship_date": null,
+  "carrier": {
+    "name": null,
+    "scac": "OVOY"
+  },
+  "freight_lines": [],
+  "total_weight": null,
+  "total_packages": null
+}
